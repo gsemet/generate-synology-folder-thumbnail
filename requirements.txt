@@ -1,0 +1,9 @@
+pillow>=9.0
+click
+pillow_heif
+tqdm
+opencv-python
+
+# Dev
+tqdm-stubs
+types-Pillow
