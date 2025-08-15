@@ -36,21 +36,24 @@ Features:
 
 from __future__ import annotations
 
-from itertools import chain
-from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
 import os
 import random
 
-from PIL import Image, ImageDraw, ImageOps
-from pillow_heif import register_heif_opener
-from tqdm import tqdm
+from functools import lru_cache
+from itertools import chain
+from pathlib import Path
+from typing import Iterable, List, Sequence, Tuple
+
 import click
 import cv2
 import mediapipe as mp
 import numpy as np
 import open_clip
 import torch
+
+from PIL import Image, ImageDraw, ImageOps
+from pillow_heif import register_heif_opener
+from tqdm import tqdm
 
 
 # Register HEIC support for Pillow
@@ -67,8 +70,9 @@ EYE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml
 mp_face = mp.solutions.face_detection
 face_detector = mp_face.FaceDetection(model_selection=1, min_detection_confidence=0.5)
 
-# Initialize OpenCLIP model (CPU)
-device = "cpu"
+# Initialize OpenCLIP model
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
 clip_model, _, preprocess = open_clip.create_model_and_transforms(
     "ViT-B-32",
     pretrained="laion2b_s34b_b79k",
@@ -77,26 +81,30 @@ clip_model.to(device)
 clip_model.eval()
 
 CLIP_PROMPTS = [
-    # People
-    "a group of people smiling and looking at the camera",
-    "a close-up portrait of a person with clear eyes",
-    "people interacting naturally in a lively scene",
-    "a person laughing in a candid moment",
+    # People – group-focused
+    "a group of people smiling and looking at the camera outdoors",
+    "friends or family gathered together in a happy moment",
+    "a wedding party or celebration with many people",
+    "a team of people posing for a picture",
+    # People – reduced emphasis on single faces
+    "a person in a natural setting with an interesting background",
+    "a candid shot of a person interacting with others",
     # Landscape / scenery
-    "a beautiful wide landscape with mountains or rivers",
-    "a colorful sunset over nature",
-    "a dramatic sky over an open field",
-    "an urban scene with interesting composition and lighting",
+    "a wide landscape with mountains and rivers under dramatic light",
+    "a colorful sunset over a city skyline",
+    "a forest with sunlight streaming through the trees",
+    "an open field with a vivid sky",
     # Composition / aesthetics
     "a well-composed photograph with balanced framing",
-    "an image with clear focus and sharp details",
-    "an aesthetically pleasing scene with symmetry",
-    "a visually striking image with vibrant colors",
+    "an image with sharp details and pleasing depth",
+    "a scene with symmetry and harmonious colors",
+    "a photograph with strong leading lines and perspective",
     # Action / emotion
-    "people expressing joy or excitement",
+    "people sharing joy in a lively environment",
     "a dynamic action scene with motion",
-    "an interesting moment captured candidly",
+    "a meaningful moment between multiple people",
 ]
+
 """
 CLIP_PROMPTS: List of textual prompts used to rank images by 'interest'.
 
@@ -115,6 +123,47 @@ Example usage:
     scores = [clip_model.score(img, CLIP_PROMPTS) for img in images]
     best_image = images[np.argmax(scores)]
 """
+
+
+@lru_cache(maxsize=4096)
+def _cached_walk_dir(
+    path: str,
+) -> Tuple[List[str], List[str], List[Tuple[str, List[str], List[str]],]]:
+    """Return (dirs, files, subresults) for a single folder, caching by folder path."""
+    dirs: List[str] = []
+    files: List[str] = []
+    try:
+        for entry in os.scandir(path):
+            if entry.is_dir(follow_symlinks=False):
+                dirs.append(entry.name)
+            elif entry.is_file(follow_symlinks=False):
+                files.append(entry.name)
+    except PermissionError:
+        return [], [], []
+
+    subresults = []
+    for d in dirs:
+        subpath = os.path.join(path, d)
+        subresults.append((subpath, *_cached_walk_dir(subpath)))
+    return dirs, files, subresults
+
+
+def cached_walk(root: str, show_progress: bool = False):
+    """Yield (root, dirs, files) like os.walk but with per-folder LRU caching."""
+    iterator = _iter_walk(root)
+    if show_progress:
+        iterator = tqdm(iterator, desc="Walking folders", unit=" dir")
+    for item in iterator:
+        yield item
+
+
+def _iter_walk(root: str):
+    dirs, files, subresults = _cached_walk_dir(root)
+    yield root, dirs, files
+    for subpath, subdirs, subfiles, subsubresults in subresults:
+        yield subpath, subdirs, subfiles
+        for r in subsubresults:
+            yield r[0], r[1], r[2]
 
 
 def _extract_video_frame(video_path: Path) -> Image.Image:
@@ -545,7 +594,10 @@ def _find_image_folders(root: Path) -> Iterable[Path]:
     """Yield folders that contain subfolders but no top-level images (except thumbnail.*)."""
     scanned = 0
     click.secho(f"Scanning folders under {root} ...", fg="cyan")
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in cached_walk(
+        root,
+        show_progress=True,
+    ):
         folder = Path(dirpath)
         if folder.name.startswith("."):
             continue
