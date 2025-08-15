@@ -428,19 +428,35 @@ def generate_thumbnail_grid(
     target_width: int = 1200,
     target_height: int = 1200,
     candidates_per_tile: int = CANDIDATES_PER_TILE_DEFAULT,
+    force_image1: Path | None = None,
+    force_image2: Path | None = None,
+    force_image3: Path | None = None,
+    force_image4: Path | None = None,
 ) -> None:
     """Create a 2x2 folder thumbnail grid from four images/videos."""
     click.secho(f"Generating folder thumbnails from {input_folder}", fg="yellow")
-    images = get_images_from_folder(input_folder)
-    if not images:
-        click.secho(f"No images found in {input_folder}, skipping.", fg="red")
-        return
 
-    selected_images = pick_4_images(
-        images,
-        rng=rng,
-        candidates_per_tile=candidates_per_tile,
-    )
+    if force_image1 and force_image2 and force_image3 and force_image4:
+        selected_images = [
+            (Image.open(force_image1), force_image1),
+            (Image.open(force_image2), force_image2),
+            (Image.open(force_image3), force_image3),
+            (Image.open(force_image4), force_image4),
+        ]
+        click.secho(
+            "Forced images:\n" + "\n".join(f" - {s[1]}" for s in selected_images),
+            fg="yellow",
+        )
+    else:
+        images = get_images_from_folder(input_folder)
+        if not images:
+            click.secho(f"No images found in {input_folder}, skipping.", fg="red")
+            return
+        selected_images = pick_4_images(
+            images,
+            rng=rng,
+            candidates_per_tile=candidates_per_tile,
+        )
     click.secho("Selected images:\n" + "\n".join(f" - {s[1]}" for s in selected_images))
 
     processed_images: List[Image.Image] = []
@@ -548,12 +564,56 @@ def _find_image_folders(root: Path) -> Iterable[Path]:
     show_default=True,
     help="Number of candidate images to consider per tile when ranking.",
 )
+@click.option(
+    "--force-image1",
+    type=click.Path(
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        path_type=Path,
+    ),
+    help="Path to the first image to force.",
+)
+@click.option(
+    "--force-image2",
+    type=click.Path(
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        path_type=Path,
+    ),
+    help="Path to the second image to force.",
+)
+@click.option(
+    "--force-image3",
+    type=click.Path(
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        path_type=Path,
+    ),
+    help="Path to the third image to force.",
+)
+@click.option(
+    "--force-image4",
+    type=click.Path(
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        path_type=Path,
+    ),
+    help="Path to the fourth image to force.",
+)
 def main(
     input_folder: Path,
     width: int,
     height: int,
     seed: int,
     candidates_per_tile: int,
+    force_image1: Path | None = None,
+    force_image2: Path | None = None,
+    force_image3: Path | None = None,
+    force_image4: Path | None = None,
 ) -> None:
     """CLI entry point."""
     rng = random.Random(seed)
@@ -562,6 +622,23 @@ def main(
     click.secho(f"Target size: {width}x{height}", fg="cyan")
     click.secho(f"Random seed: {seed}", fg="cyan")
     click.secho(f"Candidates per tile: {candidates_per_tile}", fg="cyan")
+
+    if force_image1 and force_image2 and force_image3 and force_image4:
+        output_file = input_folder / "thumbnail.jpg"
+        output_file.unlink(missing_ok=True)
+        generate_thumbnail_grid(
+            input_folder,
+            output_file,
+            target_width=width,
+            target_height=height,
+            rng=rng,
+            candidates_per_tile=candidates_per_tile,
+            force_image1=force_image1,
+            force_image2=force_image2,
+            force_image3=force_image3,
+            force_image4=force_image4,
+        )
+        return
 
     for folder in _find_image_folders(input_folder):
         output_file = folder / "thumbnail.jpg"
