@@ -23,6 +23,7 @@ Features:
 # requires-python = ">=3.11"
 # dependencies = [
 #    "click",
+#    "mediapipe",
 #    "open_clip_torch",
 #    "opencv-python",
 #    "pillow_heif",
@@ -35,21 +36,21 @@ Features:
 
 from __future__ import annotations
 
-import os
-import random
 from itertools import chain
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
+import os
+import random
 
-import click
 from PIL import Image, ImageDraw, ImageOps
 from pillow_heif import register_heif_opener
 from tqdm import tqdm
+import click
 import cv2
-import numpy as np
 import mediapipe as mp
-import torch
+import numpy as np
 import open_clip
+import torch
 
 
 # Register HEIC support for Pillow
@@ -57,7 +58,7 @@ register_heif_opener()
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".webp", ".tiff", ".bmp"}
 VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v", ".avi", ".mkv", ".insv"}
-CANDIDATES_PER_TILE_DEFAULT = 8
+CANDIDATES_PER_TILE_DEFAULT = 5
 
 # Haar cascade for eye detection
 EYE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
@@ -231,46 +232,90 @@ def crop_to_aspect_ratio(
     padding_left: int = 0,
 ) -> Image.Image:
     """
-    Crop and resize image, centering on the biggest detected faces if any.
-
+    Crop and resize the image to the target aspect ratio, centering on detected faces if any.
+    If multiple faces are detected, it computes a bounding box around all significant faces.
     Respects EXIF rotation metadata.
+
+    Steps:
+    - Apply EXIF transpose to respect orientation.
+    - Detect faces and get their bounding boxes.
+    - If one or more faces are found, compute a group bounding box and center the crop there.
+    - Maintain the target aspect ratio during cropping (no squeezing).
+    - Add rounded corners and optional padding.
+
+    Parameters:
+        image (PIL.Image.Image): The source image.
+        target_width (int): Final width in pixels.
+        target_height (int): Final height in pixels.
+        padding_top, padding_right, padding_bottom, padding_left (int): Padding in pixels.
+
+    Returns:
+        PIL.Image.Image: Cropped, resized image with optional padding.
     """
-    # Apply EXIF-based rotation/mirroring first
+    # Apply EXIF-based rotation/mirroring
     image = ImageOps.exif_transpose(image)
     w, h = image.size
 
-    w, h = image.size
     img_np = np.array(image.convert("RGB"))
-    results = face_detector.process(img_np)
+    results = face_detector.process(img_np)  # assumes global face_detector
 
-    cx, cy = w // 2, h // 2  # default center
+    # Default center is image center
+    cx, cy = w // 2, h // 2
 
     if results.detections:
-        # Pick the most central face
-        best_score = -1
+        # Collect all face centers and bounding boxes
+        face_boxes = []
         for det in results.detections:
             bbox = det.location_data.relative_bounding_box
             x1 = int(bbox.xmin * w)
             y1 = int(bbox.ymin * h)
             bw = int(bbox.width * w)
             bh = int(bbox.height * h)
-            fx, fy = x1 + bw // 2, y1 + bh // 2
+            face_boxes.append((x1, y1, x1 + bw, y1 + bh))
 
-            # Score based on distance to image center
-            dist = np.hypot(fx - w / 2, fy - h / 2)
-            score = -dist  # closer to center = higher score
-            if score > best_score:
-                best_score = score
-                cx, cy = fx, fy
+        # Compute group bounding box
+        min_x = min(b[0] for b in face_boxes)
+        min_y = min(b[1] for b in face_boxes)
+        max_x = max(b[2] for b in face_boxes)
+        max_y = max(b[3] for b in face_boxes)
 
-    crop_box = (
-        max(0, cx - target_width // 2),
-        max(0, cy - target_height // 2),
-        min(w, cx + target_width // 2),
-        min(h, cy + target_height // 2),
-    )
-    cropped = image.crop(crop_box)
+        group_cx = (min_x + max_x) // 2
+        group_cy = (min_y + max_y) // 2
 
+        cx, cy = group_cx, group_cy
+
+        # Expand box slightly to avoid tight crop
+        group_w = max_x - min_x
+        group_h = max_y - min_y
+    else:
+        group_w = w
+        group_h = h
+
+    # Maintain target aspect ratio
+    target_aspect = target_width / target_height
+    crop_width = group_w
+    crop_height = group_h
+
+    if crop_width / crop_height < target_aspect:
+        crop_width = int(crop_height * target_aspect)
+    else:
+        crop_height = int(crop_width / target_aspect)
+
+    # Center crop around cx, cy
+    left = max(0, cx - crop_width // 2)
+    top = max(0, cy - crop_height // 2)
+    right = min(w, left + crop_width)
+    bottom = min(h, top + crop_height)
+
+    # Adjust if crop goes out of bounds
+    if right - left < crop_width:
+        left = max(0, right - crop_width)
+    if bottom - top < crop_height:
+        top = max(0, bottom - crop_height)
+
+    cropped = image.crop((left, top, right, bottom))
+
+    # Resize to final output
     fitted = ImageOps.fit(cropped, (target_width, target_height), method=Image.BICUBIC)
     rounded = add_corners(fitted, radius=64)
     return add_margin(
