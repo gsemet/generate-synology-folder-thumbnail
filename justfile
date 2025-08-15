@@ -8,12 +8,12 @@ check:
     uv tool run --default-index https://pypi.org/simple ruff check .
 
 run arguments:
-    uv run --default-index https://pypi.org/simple generate_synology_forder_thumbnail.py \
+    time uv run --default-index https://pypi.org/simple generate_synology_folder_thumbnail.py \
         --seed 1234 \
         {{arguments}}
 
 run-force:
-    uv run --default-index https://pypi.org/simple generate_synology_forder_thumbnail.py \
+    time uv run --default-index https://pypi.org/simple generate_synology_folder_thumbnail.py \
         /Volumes/photo/Famille/2025 \
         --force-image1 "/Volumes/photo/Famille/2025/25.02/2025-02-01 12.26.25.heic" \
         --force-image2 "/Volumes/photo/Famille/2025/25.04.19-20 - Week end Carcasonne/2025.04.21-14.38.16.heic" \

@@ -3,7 +3,9 @@
 Generate a 2×2 folder thumbnail image from pictures or videos inside a given directory.
 Designed for Synology DSM folder previews, but works with any folder containing images or videos.
 
-It is mean to give Synology Photo the thumbnail of parent folder without direct photo.
+It is mean to provide to Synology Photos (or File Station or  Video Station / Media Server)
+the thumbnail of folder without direct photo, for example in a hierarchical folder structure
+is used.
 
 ## Rationale
 

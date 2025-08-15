@@ -13,10 +13,12 @@ Features:
       to rank them by relevance using locally run open source AI models.
     - Crops each to the requested size, optionally centering on detected eyes.
     - Adds rounded corners and margins.
-    - Assembles them into a 2×2 grid and saves as `thumbnail.jpg`.
+    - Assembles them into a 2×2 grid and saves as `thumbnail.jpg`, so that
+      Synology DSM can use it as a folder preview.
     - Fast file scanning using extension filters.
     - EXIF orientation correction.
-    - HEIC/HEIF image support via pillow_heif.
+    - HEIC/HEIF image support.
+    - Extract thumbnail images from videos if selected.
 """
 
 # /// script
@@ -40,7 +42,6 @@ import os
 import random
 
 from functools import lru_cache
-from itertools import chain
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 
@@ -60,6 +61,8 @@ from tqdm import tqdm
 register_heif_opener()
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".webp", ".tiff", ".bmp"}
+IMAGE_EXTS_TUPLES = tuple(ext.lower() for ext in IMAGE_EXTS)
+
 VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v", ".avi", ".mkv", ".insv"}
 CANDIDATES_PER_TILE_DEFAULT = 5
 
@@ -126,10 +129,7 @@ Example usage:
 
 
 @lru_cache(maxsize=4096)
-def _cached_walk_dir(
-    path: str,
-) -> Tuple[List[str], List[str], List[Tuple[str, List[str], List[str]],]]:
-    """Return (dirs, files, subresults) for a single folder, caching by folder path."""
+def _cached_walk_dir(path: str) -> Tuple[List[str], List[str]]:
     dirs: List[str] = []
     files: List[str] = []
     try:
@@ -139,31 +139,27 @@ def _cached_walk_dir(
             elif entry.is_file(follow_symlinks=False):
                 files.append(entry.name)
     except PermissionError:
-        return [], [], []
-
-    subresults = []
-    for d in dirs:
-        subpath = os.path.join(path, d)
-        subresults.append((subpath, *_cached_walk_dir(subpath)))
-    return dirs, files, subresults
+        return [], []
+    return dirs, files
 
 
-def cached_walk(root: str, show_progress: bool = False):
-    """Yield (root, dirs, files) like os.walk but with per-folder LRU caching."""
-    iterator = _iter_walk(root)
-    if show_progress:
-        iterator = tqdm(iterator, desc="Walking folders", unit=" dir")
-    for item in iterator:
-        yield item
-
-
-def _iter_walk(root: str):
-    dirs, files, subresults = _cached_walk_dir(root)
+def _iter_walk(root: str, pbar=None):
+    dirs, files = _cached_walk_dir(root)
+    if pbar is not None:
+        pbar.update(1)  # update for each visited directory
     yield root, dirs, files
-    for subpath, subdirs, subfiles, subsubresults in subresults:
-        yield subpath, subdirs, subfiles
-        for r in subsubresults:
-            yield r[0], r[1], r[2]
+    for d in dirs:
+        subpath = os.path.join(root, d)
+        yield from _iter_walk(subpath, pbar)
+
+
+def cached_walk(root: str | Path, show_progress: bool = False):
+    pbar = tqdm(desc="Walking folders", unit=" dir") if show_progress else None
+    try:
+        yield from _iter_walk(str(root), pbar)
+    finally:
+        if pbar is not None:
+            pbar.close()
 
 
 def _extract_video_frame(video_path: Path) -> Image.Image:
@@ -201,39 +197,49 @@ def _extract_video_frame(video_path: Path) -> Image.Image:
     return img
 
 
-def _iter_image_files(folder: Path) -> Iterable[Path]:
-    """Yield image paths under a folder with extension filtering.
+def _iter_image_files(folder: Path, pbar=None) -> Iterable[Path]:
+    """Yield image paths under a folder with extension filtering."""
+    stack = [str(folder)]
+    dir_count = 0
+    img_count = 0
+    dir_batch = 12  # update pbar every N dirs
+    img_batch = 50  # update postfix every N images
 
-    Args:
-        folder: Root directory to scan.
+    while stack:
+        path = stack.pop()
+        dir_count += 1
+        if pbar is not None and dir_count % dir_batch == 0:
+            pbar.update(dir_batch)
 
-    Yields:
-        Paths to image files.
-    """
-    patterns = tuple(f"*{ext}" for ext in IMAGE_EXTS)
-    generators = (folder.rglob(pat) for pat in patterns)
-    for path in chain.from_iterable(generators):
-        if path.suffix.lower() in IMAGE_EXTS:
-            yield path
+        try:
+            with os.scandir(path) as it:
+                for entry in it:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                    elif entry.is_file(follow_symlinks=False):
+                        name = entry.name
+                        # Faster than splitext -> lowercase -> in set
+                        if name.lower().endswith(IMAGE_EXTS_TUPLES):
+                            img_count += 1
+                            if pbar is not None and img_count % img_batch == 0:
+                                pbar.set_postfix(images=img_count)
+                            yield Path(entry.path)
+        except PermissionError:
+            continue
+
+    if pbar is not None:
+        pbar.update(dir_count % dir_batch)  # final leftover
+        pbar.set_postfix(images=img_count)  # final count
 
 
 def get_images_from_folder(folder: Path) -> List[Path]:
-    """Collect image files under a folder recursively.
-
-    Args:
-        folder: Root directory to scan.
-
-    Returns:
-        List of image paths.
-    """
-    click.secho(f"Selecting 4 random pictures...", fg="yellow")
-    return list(
-        tqdm(
-            _iter_image_files(folder),
-            desc="Searching pictures or supported video ...",
-            unit=" img",
-        )
-    )
+    """Collect image files under a folder recursively."""
+    click.secho(f"Selecting 4 random pictures under {folder}...", fg="yellow")
+    with tqdm(
+        desc="Scanning folders",
+        unit=" dir",
+    ) as pbar:
+        return list(_iter_image_files(folder, pbar))
 
 
 def add_margin(
@@ -393,7 +399,27 @@ def assemble_grid(
 
 
 def score_image(path: Path) -> float:
-    """Return an 'interestingness' score using Mediapipe + OpenCLIP."""
+    """Return an 'interestingness' score using Mediapipe + OpenCLIP.
+
+    The score is calculated based on the following components:
+    - **Face Detection (Mediapipe)**:
+        - Number of detected faces (each adds a base score).
+        - Proximity of faces to the image center (closer faces add more score).
+    - **Semantic Similarity (OpenCLIP)**:
+        - Measures how closely the image matches a set of predefined textual prompts.
+    - **Sharpness**:
+        - Estimated using the variance of the Laplacian of the grayscale image.
+    - **Colorfulness**:
+        - Quantified using the difference between RGB channels.
+
+    Parameters:
+        path (Path): Path to the image file.
+
+    Returns:
+        float: A composite score representing the image's overall 'interestingness'.
+            Returns 0.0 if the image cannot be loaded or processed.
+
+    """
     try:
         img = Image.open(path).convert("RGB")
         img_np = np.array(img)
@@ -432,11 +458,18 @@ def score_image(path: Path) -> float:
     except Exception:
         pass
 
-    # Sharpness bonus
+    # Improved sharpness scoring
     img_gray = np.array(img.convert("L"))
-    lap = cv2.Laplacian(img_gray, cv2.CV_64F)
-    blur_var = lap.var()
-    score += min(10, blur_var / 1000)
+    lap_var = cv2.Laplacian(img_gray, cv2.CV_64F).var()
+    sobelx = cv2.Sobel(img_gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(img_gray, cv2.CV_64F, 0, 1, ksize=3)
+    sobel_mag = np.sqrt(sobelx**2 + sobely**2)
+    sobel_score = np.mean(sobel_mag)
+
+    if lap_var < 100 and sobel_score < 10:
+        score -= 10  # Penalize blurry images
+    else:
+        score += min(10, (lap_var + sobel_score) / 200)
 
     # Colorfulness bonus
     (R, G, B) = np.array(img).astype("float").transpose(2, 0, 1)
@@ -456,7 +489,7 @@ def pick_4_images(
     rng: random.Random,
     candidates_per_tile: int,
 ):
-    """Pick one thumbnail per quarter, preferring images with people and sharpness."""
+    """Pick one thumbnail per tile, preferring images with people and sharpness."""
     if not image_paths:
         return []
 
@@ -596,7 +629,7 @@ def _find_image_folders(root: Path) -> Iterable[Path]:
     click.secho(f"Scanning folders under {root} ...", fg="cyan")
     for dirpath, dirnames, filenames in cached_walk(
         root,
-        show_progress=True,
+        show_progress=False,
     ):
         folder = Path(dirpath)
         if folder.name.startswith("."):
