@@ -38,6 +38,7 @@ Features:
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 import os
 import random
 
@@ -64,7 +65,14 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".webp", ".tiff", ".bmp"}
 IMAGE_EXTS_TUPLES = tuple(ext.lower() for ext in IMAGE_EXTS)
 
 VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v", ".avi", ".mkv", ".insv"}
-CANDIDATES_PER_TILE_DEFAULT = 5
+
+DEFAULT_CANDIDATES_PER_TILE = 5
+DEFAULT_THUMBNAIL_WIDTH = 640
+DEFAULT_THUMBNAIL_HEIGHT = 640
+DEFAULT_THUMBNAIL_FILENAME = "thumbnail.jpg"
+DEFAULT_FACE_MARGIN_RATIO = 0.2
+FACE_VERTICAL_SHIFT_RATIO = -0.1
+DEFAULT_CORNER_RADIUS_PERCENT = 0.04
 
 # Haar cascade for eye detection
 EYE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
@@ -126,6 +134,10 @@ Example usage:
     scores = [clip_model.score(img, CLIP_PROMPTS) for img in images]
     best_image = images[np.argmax(scores)]
 """
+TEXT_TOKENS = open_clip.tokenize(CLIP_PROMPTS).to(device)
+with torch.no_grad():
+    TEXT_FEATURES = clip_model.encode_text(TEXT_TOKENS)
+    TEXT_FEATURES /= TEXT_FEATURES.norm(dim=-1, keepdim=True)
 
 
 @lru_cache(maxsize=4096)
@@ -285,6 +297,7 @@ def crop_to_aspect_ratio(
     padding_right: int = 0,
     padding_bottom: int = 0,
     padding_left: int = 0,
+    face_margin_ratio: float = DEFAULT_FACE_MARGIN_RATIO,
 ) -> Image.Image:
     """
     Crop and resize the image to the target aspect ratio, centering on detected faces if any.
@@ -334,12 +347,25 @@ def crop_to_aspect_ratio(
         max_x = max(b[2] for b in face_boxes)
         max_y = max(b[3] for b in face_boxes)
 
-        group_cx = (min_x + max_x) // 2
-        group_cy = (min_y + max_y) // 2
+        group_w = max_x - min_x
+        group_h = max_y - min_y
 
-        cx, cy = group_cx, group_cy
+        # Expand with margin
+        margin_x = int(group_w * face_margin_ratio)
+        margin_y = int(group_h * face_margin_ratio)
+        min_x = max(0, min_x - margin_x)
+        min_y = max(0, min_y - margin_y)
+        max_x = min(w, max_x + margin_x)
+        max_y = min(h, max_y + margin_y)
 
-        # Expand box slightly to avoid tight crop
+        # Updated group center
+        cx = (min_x + max_x) // 2
+        cy = (min_y + max_y) // 2
+
+        # Shift upward (reduce cy)
+        shift_up = int(group_h * DEFAULT_FACE_MARGIN_RATIO)
+        cy = max(0, cy - shift_up)
+
         group_w = max_x - min_x
         group_h = max_y - min_y
     else:
@@ -372,7 +398,8 @@ def crop_to_aspect_ratio(
 
     # Resize to final output
     fitted = ImageOps.fit(cropped, (target_width, target_height), method=Image.BICUBIC)
-    rounded = add_corners(fitted, radius=64)
+    radius = int(fitted.width * DEFAULT_CORNER_RADIUS_PERCENT)
+    rounded = add_corners(fitted, radius=radius)
     return add_margin(
         rounded,
         padding_top=padding_top,
@@ -450,10 +477,7 @@ def score_image(path: Path) -> float:
         with torch.no_grad():
             image_features = clip_model.encode_image(img_input)
             image_features /= image_features.norm(dim=-1, keepdim=True)
-            text_tokens = open_clip_torch.tokenize(CLIP_PROMPTS).to(device)
-            text_features = clip_model.encode_text(text_tokens)
-            text_features /= text_features.norm(dim=-1, keepdim=True)
-            similarities = (image_features @ text_features.T).squeeze(0)
+            similarities = (image_features @ TEXT_FEATURES.T).squeeze(0)
             score += similarities.max().item() * 20  # weight semantic similarity
     except Exception:
         pass
@@ -517,9 +541,15 @@ def pick_4_images(
             f"  Tile {i}/4: Ranking...",
             fg="yellow",
         )
-        scored_candidates = [(score_image(p), p) for p in candidates]
+
+        # Parallel scoring
+        with ProcessPoolExecutor() as executor:
+            scores = list(executor.map(score_image, candidates))
+
+        scored_candidates = list(zip(scores, candidates))
+
         click.secho(
-            f"  Tile {i}/4: Scored candidates: "
+            f"  Tile {i}/4: Scored candidates:\n"
             + "\n".join(
                 f"    - {s[0]:>6.2f}: {s[1]}"
                 for s in sorted(
@@ -554,7 +584,7 @@ def generate_thumbnail_grid(
     rng: random.Random,
     target_width: int = 1200,
     target_height: int = 1200,
-    candidates_per_tile: int = CANDIDATES_PER_TILE_DEFAULT,
+    candidates_per_tile: int = DEFAULT_CANDIDATES_PER_TILE,
     force_image1: Path | None = None,
     force_image2: Path | None = None,
     force_image3: Path | None = None,
@@ -587,7 +617,9 @@ def generate_thumbnail_grid(
     click.secho("Selected images:\n" + "\n".join(f" - {s[1]}" for s in selected_images))
 
     processed_images: List[Image.Image] = []
-    padding = 20
+    padding_percent = 0.0125  # 1.25%
+    padding = int(target_width * padding_percent)
+
     paddings = [
         (0, padding, padding, 0),
         (0, 0, padding, padding),
@@ -670,14 +702,14 @@ def _find_image_folders(root: Path) -> Iterable[Path]:
 @click.option(
     "--width",
     type=int,
-    default=1600,
+    default=DEFAULT_THUMBNAIL_WIDTH,
     show_default=True,
     help="Per-tile width in pixels.",
 )
 @click.option(
     "--height",
     type=int,
-    default=1600,
+    default=DEFAULT_THUMBNAIL_HEIGHT,
     show_default=True,
     help="Per-tile height in pixels.",
 )
@@ -690,7 +722,7 @@ def _find_image_folders(root: Path) -> Iterable[Path]:
 @click.option(
     "--candidates-per-tile",
     type=int,
-    default=CANDIDATES_PER_TILE_DEFAULT,
+    default=DEFAULT_CANDIDATES_PER_TILE,
     show_default=True,
     help="Number of candidate images to consider per tile when ranking.",
 )
@@ -754,7 +786,7 @@ def main(
     click.secho(f"Candidates per tile: {candidates_per_tile}", fg="cyan")
 
     if force_image1 and force_image2 and force_image3 and force_image4:
-        output_file = input_folder / "thumbnail.jpg"
+        output_file = input_folder / DEFAULT_THUMBNAIL_FILENAME
         output_file.unlink(missing_ok=True)
         generate_thumbnail_grid(
             input_folder,
@@ -771,7 +803,7 @@ def main(
         return
 
     for folder in _find_image_folders(input_folder):
-        output_file = folder / "thumbnail.jpg"
+        output_file = folder / DEFAULT_THUMBNAIL_FILENAME
         output_file.unlink(missing_ok=True)
         generate_thumbnail_grid(
             folder,

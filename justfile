@@ -22,5 +22,9 @@ run-force:
 
 run-all:
     just run '/Volumes/photo/GS\ Photographie/2024/'
+    just run '/Volumes/photo/Gaetan/2021'
+    just run '/Volumes/photo/Gaetan/2022'
+    just run '/Volumes/photo/Gaetan/2023'
+    just run '/Volumes/photo/Gaetan/2024'
     just run '/Volumes/photo/Gaetan/2024'
     just run '/Volumes/photo/Gaetan/2025'
