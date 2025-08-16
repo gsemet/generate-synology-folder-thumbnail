@@ -363,7 +363,7 @@ def crop_to_aspect_ratio(
         cy = (min_y + max_y) // 2
 
         # Shift upward (reduce cy)
-        shift_up = int(group_h * DEFAULT_FACE_MARGIN_RATIO)
+        shift_up = int(group_h * face_margin_ratio)
         cy = max(0, cy - shift_up)
 
         group_w = max_x - min_x
