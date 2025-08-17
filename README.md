@@ -7,6 +7,8 @@ It is mean to provide to Synology Photos (or File Station or  Video Station / Me
 the thumbnail of folder without direct photo, for example in a hierarchical folder structure
 is used.
 
+It is also a playground of mine to evaluate local AI model usage, using CLIP and OpenCV.
+
 ## Rationale
 
 I use a deeply nested hierarchical structure that worked for years, and compatible with
