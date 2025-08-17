@@ -21,10 +21,11 @@ run-force:
         --force-image4 "/Volumes/photo/Famille/2025/25.07/2025-07-26 23.16.49.jpg"
 
 run-all:
-    just run '/Volumes/photo/GS\ Photographie/2024/'
-    just run '/Volumes/photo/Gaetan/2021'
-    just run '/Volumes/photo/Gaetan/2022'
-    just run '/Volumes/photo/Gaetan/2023'
-    just run '/Volumes/photo/Gaetan/2024'
-    just run '/Volumes/photo/Gaetan/2024'
-    just run '/Volumes/photo/Gaetan/2025'
+    just run '/Volumes/photo/GS\ Photographie/2021/'
+    just run '/Volumes/photo/GS\ Photographie/2022/'
+    just run '/Volumes/photo/Famille/2020'
+    just run '/Volumes/photo/Famille/2021'
+    just run '/Volumes/photo/Famille/2022'
+    just run '/Volumes/photo/Famille/2023'
+    just run '/Volumes/photo/Famille/2024'
+    just run '/Volumes/photo/Famille/2025'
